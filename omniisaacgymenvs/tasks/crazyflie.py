@@ -36,6 +36,7 @@ from omni.isaac.core.objects import DynamicSphere
 from omni.isaac.core.prims import RigidPrimView
 from omni.isaac.core.utils.prims import get_prim_at_path
 
+import random
 import numpy as np
 import torch
 
@@ -50,6 +51,12 @@ class CrazyflieTask(RLTask):
             env,
             offset=None
     ) -> None:
+
+        self.x_offset = 2; #
+        self.y_offset = 3; #seite
+        self.z_offset = 1; #höhe
+        self.obstacleAmount = 5
+
         self._sim_config = sim_config
         self._cfg = sim_config.config
         self._task_cfg = sim_config.task_config
@@ -64,8 +71,9 @@ class CrazyflieTask(RLTask):
         self._num_actions = 4
 
         self._crazyflie_position = torch.tensor([0, 0, 1.0])
-        self._ball_position = torch.tensor([0, 0, 1.0])
-
+        self._ball_position = torch.tensor([self.x_offset*1, self.y_offset*1, self.z_offset*1.0])
+        self._ball_position_dummy = torch.tensor([0, 0 ,1.0])
+        self._ball_position_hindernis = torch.tensor([1, 1.5 ,1.0])
         RLTask.__init__(self, name=name, env=env)
 
         # parameters for the crazyflie
@@ -100,7 +108,10 @@ class CrazyflieTask(RLTask):
         self.prop_max_rot = 433.3
 
         self.target_positions = torch.zeros((self._num_envs, 3), device=self._device, dtype=torch.float32)
-        self.target_positions[:, 2] = 1
+        #self.target_positions[:, 2] = 1 * self.z_offset
+        #self.target_positions[:, 1] = 1 * self.y_offset
+        #self.target_positions[:, 0] = 1 * self.x_offset
+
         self.actions = torch.zeros((self._num_envs, 4), device=self._device, dtype=torch.float32)
 
         self.all_indices = torch.arange(self._num_envs, dtype=torch.int32, device=self._device)
@@ -118,6 +129,9 @@ class CrazyflieTask(RLTask):
     def set_up_scene(self, scene) -> None:
         self.get_crazyflie()
         self.get_target()
+        self.get_target_dummy()
+        self.get_target_hindernis()
+
         RLTask.set_up_scene(self, scene)
         self._copters = CrazyflieView(prim_paths_expr="/World/envs/.*/Crazyflie", name="crazyflie_view")
         self._balls = RigidPrimView(prim_paths_expr="/World/envs/.*/ball")
@@ -145,6 +159,51 @@ class CrazyflieTask(RLTask):
         self._sim_config.apply_articulation_settings("ball", get_prim_at_path(ball.prim_path),
                                                      self._sim_config.parse_actor_config("ball"))
         ball.set_collision_enabled(False)
+
+    def get_target_dummy(self):
+        radius = 0.1
+        color = torch.tensor([1, 1, 0])
+        ball = DynamicSphere(
+            prim_path=self.default_zero_env_path + "/ball2",
+            translation=self._ball_position_dummy,
+            name="target_0",
+            radius=radius,
+            color=color)
+        self._sim_config.apply_articulation_settings("ball2", get_prim_at_path(ball.prim_path),
+                                                     self._sim_config.parse_actor_config("ball2"))
+        ball.set_collision_enabled(False)
+
+    def get_target_hindernis(self):
+        radius = 0.4
+        color = torch.tensor([1, 1, 1])
+        ball = DynamicSphere(
+            prim_path=self.default_zero_env_path + "/ball3",
+            translation=self._ball_position_hindernis,
+            name="target_0",
+            radius=radius,
+            color=color)
+        self._sim_config.apply_articulation_settings("ball3", get_prim_at_path(ball.prim_path),
+                                                     self._sim_config.parse_actor_config("ball3"))
+        ball.set_collision_enabled(True)
+
+    def get_target_hindernis_random(self):
+        radius = 0.17
+        color = torch.tensor([1, 1, 1])
+
+        for i in range(self.obstacleAmount):
+            #zwischen 0.5 0.5 und X:2 y:3
+            _ball_position = torch.tensor([random.uniform(0.5,2), random.uniform(0.5, 3), random.uniform(0.8, 1.2)])
+
+            ball = DynamicSphere(
+                prim_path=self.default_zero_env_path + "/ball_obstacle"+str(i),
+                translation=_ball_position,
+                name="target_0",
+                radius=radius,
+                color=color)
+            self._sim_config.apply_articulation_settings("ball_obstacle"+str(i), get_prim_at_path(ball.prim_path),
+                                                         self._sim_config.parse_actor_config("ball_obstacle"+str(i)))
+            ball.set_collision_enabled(True)
+        #test
 
     def get_observations(self) -> dict:
         self.root_pos, self.root_rot = self._copters.get_world_poses(clone=False)
@@ -281,7 +340,11 @@ class CrazyflieTask(RLTask):
         envs_long = env_ids.long()
         # set target position randomly with x, y in (0, 0) and z in (2)
         self.target_positions[envs_long, 0:2] = torch.zeros((num_sets, 2), device=self._device)
-        self.target_positions[envs_long, 2] = torch.ones(num_sets, device=self._device) * 2.0
+        self.target_positions[envs_long, 2] = torch.ones(num_sets, device=self._device) * self.z_offset
+
+        #unserer bullshit:
+        self.target_positions[envs_long, 1] = torch.ones(num_sets, device=self._device) * self.y_offset
+        self.target_positions[envs_long, 0] = torch.ones(num_sets, device=self._device) * self.x_offset
 
         # shift the target up so it visually aligns better
         ball_pos = self.target_positions[envs_long] + self._env_pos[envs_long]
@@ -330,7 +393,8 @@ class CrazyflieTask(RLTask):
 
         # pos reward
         target_dist = torch.sqrt(torch.square(self.target_positions - root_positions).sum(-1))
-        pos_reward = 1.0 / (1.0 + target_dist)
+        #pos_reward = 1.0 / (1 + target_dist) #previous func
+        pos_reward = 1.0 / (5 * target_dist)  #prev 1
         self.target_dist = target_dist
         self.root_positions = root_positions
 
@@ -347,8 +411,9 @@ class CrazyflieTask(RLTask):
         spin = torch.square(root_angvels).sum(-1)
         spin_reward = 0.01 * torch.exp(-1.0 * spin)
 
+        #print(f"target_dist: {target_dist[0]} | pos_reward: {pos_reward[0]}  | spin_reward: {spin_reward[0]} ")
         # combined reward
-        self.rew_buf[:] = pos_reward + pos_reward * (up_reward + spin_reward) - effort_reward
+        self.rew_buf[:] = pos_reward + pos_reward * (0*up_reward + spin_reward) - effort_reward
 
 
         # log episode reward sums
@@ -362,6 +427,7 @@ class CrazyflieTask(RLTask):
         self.episode_sums["raw_orient"] += ups[..., 2]
         self.episode_sums["raw_effort"] += effort
         self.episode_sums["raw_spin"] += spin
+
 
     def is_done(self) -> None:
         # resets due to misbehavior
